@@ -1,0 +1,175 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import Dense, LSTM, Dropout
+from keras.optimizers import Adam
+import yfinance as yf
+import math
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import matplotlib.pyplot as plt
+import os
+
+# Mevcut çalışma dizinini kontrol etme
+print("Mevcut Çalışma Dizini:", os.getcwd())
+
+# Veri toplama (yfinance kütüphanesinden verielri alma)
+data = yf.download('GOOG', start='2020-01-01', end='2023-01-01')
+
+# Ham veriler tablosu
+ham_veriler = data[['Open', 'High', 'Low', 'Close', 'Volume']]
+ham_veriler.reset_index(inplace=True)
+
+# Ham verileri CSV dosyasına kaydetme
+ham_veriler.to_csv('ham_veriler.csv', index=False)
+
+# Ham verilerden birkaç örnek gösterme
+print("Ham Veriler (Örnek):")
+print(ham_veriler.head())
+
+# Veri ön işleme
+features = ['Open', 'High', 'Low', 'Close', 'Volume']
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data[features])
+
+# İşlenmiş veriler tablosu
+islenmis_veriler = pd.DataFrame(scaled_data, columns=features)
+
+# İşlenmiş verileri CSV dosyasına kaydetme
+islenmis_veriler.to_csv('islenmis_veriler.csv', index=False)
+
+# İşlenmiş verilerden birkaç örnek gösterme
+print("İşlenmiş Veriler (Örnek):")
+print(islenmis_veriler.head())
+
+# Eğitim ve test setlerine ayırma
+train_size = int(len(scaled_data) * 0.8)
+test_size = len(scaled_data) - train_size
+train_data, test_data = scaled_data[0:train_size], scaled_data[train_size:len(scaled_data)]
+
+# LSTM için veri setini hazırlama
+def create_dataset(dataset, time_step=1):
+    X, Y = [], []
+    for i in range(len(dataset)-time_step-1):
+        a = dataset[i:(i+time_step)]
+        X.append(a)
+        Y.append(dataset[i + time_step, 3])  
+    return np.array(X), np.array(Y)
+
+time_step = 50  # Zaman adımı
+X_train, y_train = create_dataset(train_data, time_step)
+X_test, y_test = create_dataset(test_data, time_step)
+
+X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], len(features))
+X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], len(features))
+
+# Model geliştirme
+model = Sequential()
+model.add(LSTM(units=100, return_sequences=True, input_shape=(time_step, len(features))))
+model.add(Dropout(0.2))
+model.add(LSTM(units=100, return_sequences=False))
+model.add(Dropout(0.2))
+model.add(Dense(units=50))
+model.add(Dense(units=1))
+
+# Modeli derleme
+model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+
+# Modeli eğitme
+history = model.fit(X_train, y_train, batch_size=64, epochs=100, validation_split=0.1, verbose=1)
+
+# Tahmin yapma ve performansı değerlendirme
+train_predict = model.predict(X_train)
+test_predict = model.predict(X_test)
+
+# Sadece kapanış fiyatları ölçeklendirmesini tersine çevirme
+train_predict_close = scaler.inverse_transform(np.concatenate((train_predict, np.zeros((train_predict.shape[0], len(features) - 1))), axis=1))[:, 0]
+test_predict_close = scaler.inverse_transform(np.concatenate((test_predict, np.zeros((test_predict.shape[0], len(features) - 1))), axis=1))[:, 0]
+y_train_close = scaler.inverse_transform(np.concatenate((y_train.reshape(-1, 1), np.zeros((y_train.shape[0], len(features) - 1))), axis=1))[:, 0]
+y_test_close = scaler.inverse_transform(np.concatenate((y_test.reshape(-1, 1), np.zeros((y_test.shape[0], len(features) - 1))), axis=1))[:, 0]
+
+# RMSE ve MAE değerlerini hesaplama
+train_rmse = math.sqrt(mean_squared_error(y_train_close, train_predict_close))
+test_rmse = math.sqrt(mean_squared_error(y_test_close, test_predict_close))
+test_mae = mean_absolute_error(y_test_close, test_predict_close)
+
+print(f"Train RMSE: {train_rmse}")
+print(f"Test RMSE: {test_rmse}")
+print(f"Test MAE: {test_mae}")
+
+# Doğruluk oranı hesaplama (1 - MAE / ortalama gerçek fiyat)
+accuracy = 1 - (test_mae / np.mean(y_test_close))
+print(f"Accuracy: {accuracy * 100:.2f}%")
+
+# Eğitim tahminleri tablosu
+dates = pd.Series(data.index)
+egitim_sonuc = pd.DataFrame({
+    'Tarih': dates[time_step:time_step + len(train_predict_close)].tolist(),
+    'Gerçek Kapanış Fiyatı': y_train_close,
+    'Eğitim Tahminleri': train_predict_close
+})
+
+# Eğitim sonuçlarını CSV dosyasına kaydetme
+egitim_sonuc.to_csv('egitim_sonuc_verileri.csv', index=False)
+
+# Eğitim sonuçlarından birkaç örnek gösterme
+print("Eğitim Sonuç Verileri (Örnek):")
+print(egitim_sonuc.head(10))
+
+# Test tahminleri tablosu
+test_sonuc = pd.DataFrame({
+    'Tarih': dates[len(scaled_data) - len(test_predict_close):].tolist(),
+    'Gerçek Kapanış Fiyatı': y_test_close,
+    'Test Tahminleri': test_predict_close
+})
+
+# Test sonuçlarını CSV dosyasına kaydetme
+test_sonuc.to_csv('test_sonuc_verileri.csv', index=False)
+
+# Test sonuçlarından birkaç örnek gösterme
+print("Test Sonuç Verileri (Örnek):")
+print(test_sonuc.head(10))
+
+# Doğruluk oranları hesaplama
+dogruluk_oranlari = pd.DataFrame({
+    'Metric': ['Train RMSE', 'Test RMSE', 'Test MAE', 'Accuracy'],
+    'Value': [train_rmse, test_rmse, test_mae, accuracy * 100]
+})
+
+# Doğruluk oranlarını CSV dosyasına kaydetme
+dogruluk_oranlari.to_csv('dogruluk_oranlari.csv', index=False)
+
+# Doğruluk oranlarından birkaç örnek gösterme
+print("Doğruluk Oranları (Örnek):")
+print(dogruluk_oranlari.head())
+
+# Tahminleri görselleştirme
+plt.figure(figsize=(14, 5))
+plt.plot(dates, data['Close'], label='Gerçek Fiyatlar')
+plt.plot(dates[time_step:time_step + len(train_predict_close)], train_predict_close, label='Eğitim Tahminleri')
+plt.plot(dates[len(scaled_data) - len(test_predict_close):], test_predict_close, label='Test Tahminleri')
+plt.xlabel('Tarih')  # X ekseni etiketi
+plt.ylabel('Fiyat')  # Y ekseni etiketi
+plt.title(f'Google Hisse Senedi Fiyat Tahmini\nTime Step: {time_step}\nDoğruluk Oranı: {accuracy * 100:.2f}%')
+plt.legend()
+plt.show()
+
+# Doğrulama kaybı sonuçları görselleştirme
+plt.figure(figsize=(14, 5))
+plt.plot(history.history['loss'], label='Eğitim Kaybı')
+plt.plot(history.history['val_loss'], label='Doğrulama Kaybı')
+plt.xlabel('Epoch')
+plt.ylabel('Kayıp')
+plt.title('Eğitim ve Doğrulama Kaybı')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(14, 5))
+plt.plot(dates, data['Close'], label='Gerçek Fiyatlar')
+plt.plot(dates[time_step:time_step + len(train_predict_close)], train_predict_close, label='Eğitim Tahminleri')
+plt.plot(dates[len(scaled_data) - len(test_predict_close):], test_predict_close, label='Test Tahminleri')
+plt.xlabel('Tarih')
+plt.ylabel('Fiyat')
+plt.title('Gerçek ve Tahmin Edilen Google Hisse Senedi Fiyatları')
+plt.legend()
+plt.show()
